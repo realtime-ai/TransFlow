@@ -53,3 +53,15 @@ The project requires PyObjC but has no formal dependency management. Required im
 - The project is macOS-specific and requires macOS 12.3+ for ScreenCaptureKit
 - Screen recording permissions must be granted for the application to work
 - Currently only supports recording all system audio; application-specific recording is documented but not implemented
+
+
+## TESTS
+
+add tests in ./test directory
+
+
+## DOCS
+
+docs in ./docs directory
+
+todo in ./docs/TODO.md

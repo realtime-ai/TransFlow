@@ -1,0 +1,24 @@
+# Core dependencies
+Flask==3.0.0
+flask-socketio==5.3.6
+flask-cors==4.0.0
+python-socketio==5.11.0
+python-dotenv==1.0.0
+
+# Audio processing
+pyobjc-core==10.1
+pyobjc-framework-Cocoa==10.1
+pyobjc-framework-ScreenCaptureKit==10.1
+pyobjc-framework-AVFoundation==10.1
+numpy==1.26.3
+wave==0.0.2
+
+# OpenAI APIs
+openai==1.12.0
+
+# Async support
+eventlet==0.35.1
+
+# Utilities
+requests==2.31.0
+click==8.1.7
