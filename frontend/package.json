@@ -12,7 +12,11 @@
   "author": "",
   "license": "ISC",
   "description": "",
+  "engines": {
+    "node": ">=23.5.0"
+  },
   "dependencies": {
+    "@tailwindcss/postcss": "^4.1.11",
     "@types/node": "^24.1.0",
     "@types/react": "^19.1.9",
     "@types/react-dom": "^19.1.7",
@@ -21,6 +25,7 @@
     "postcss": "^8.5.6",
     "react": "^19.1.1",
     "react-dom": "^19.1.1",
+    "socket.io-client": "^4.8.1",
     "tailwindcss": "^4.1.11",
     "typescript": "^5.8.3"
   }

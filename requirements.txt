@@ -22,3 +22,6 @@ eventlet==0.35.1
 # Utilities
 requests==2.31.0
 click==8.1.7
+
+# Development tools
+watchdog==6.0.0

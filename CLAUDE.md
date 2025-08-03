@@ -56,12 +56,11 @@ The project requires PyObjC but has no formal dependency management. Required im
 
 
 ## TESTS
-
-add tests in ./test directory
+Add tests in `tests` directory
 
 
 ## DOCS
 
-docs in ./docs directory
+docs in `docs` directory
 
-todo in ./docs/TODO.md
+todo in `docs/TODO.md`

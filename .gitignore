@@ -209,3 +209,5 @@ __marimo__/
 *.wav
 
 .DS_Store
+
+.nvmrc

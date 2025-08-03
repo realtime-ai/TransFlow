@@ -6,140 +6,152 @@ from ScreenCaptureKit import (
     SCContentFilter,
     SCStreamConfiguration,
     SCStream,
-    SCStreamOutputTypeAudio
+    SCStreamOutputTypeAudio,
+    SCStreamOutputTypeMicrophone
 )
 import threading
 import queue
 import wave
-import struct
-import numpy as np
 import logging
 
 logger = logging.getLogger(__name__)
 
-class AudioCapture:
+class AudioCapture(NSObject):
     """Audio capture manager using ScreenCaptureKit"""
     
-    def __init__(self):
+    def __init__(self, sample_rate=48000, channels=1, bit_depth=16):
+
+        self = objc.super(AudioCapture, self).init()
+        
         self.pcm_queue = queue.Queue()
+        self.mic_queue = queue.Queue()  # Separate queue for microphone audio
         self.is_recording = False
         self.stream = None
         self.delegate = None
         
-    def list_applications(self):
-        """List all running applications that can be captured"""
-        content_ref = [None]
-        semaphore = threading.Semaphore(0)
-        
-        def completion_handler(content, error):
-            if error:
-                logger.error(f"Error getting shareable content: {error}")
-            content_ref[0] = content
-            semaphore.release()
-        
-        SCShareableContent.getShareableContentExcludingDesktopWindows_onScreenWindowsOnly_completionHandler_(
-            False, True, completion_handler
-        )
-        
-        semaphore.acquire()
-        content = content_ref[0]
-        
-        if content is None:
-            return []
-        
-        apps = content.applications() if hasattr(content, 'applications') else []
-        
-        # Extract app information
-        app_list = []
-        for app in apps:
-            app_info = {
-                'name': app.applicationName(),
-                'bundle_id': app.bundleIdentifier(),
-                'process_id': app.processID()
-            }
-            app_list.append(app_info)
-            
-        return app_list
+        # Audio format configuration
+        self.sample_rate = sample_rate
+        self.channels = channels
+        self.bit_depth = bit_depth
+
+        self.system_audio_format = None
+        self.microphone_audio_format = None
     
-    def list_audio_devices(self):
-        """List available microphone devices"""
-        devices = AVCaptureDevice.devicesWithMediaType_(AVMediaTypeAudio)
-        
+    def list_audio_devices(self, include_system_audio=True, include_microphones=True):
+        """List available audio devices and system audio capture capability"""
         device_list = []
-        for device in devices:
-            device_info = {
-                'name': device.localizedName(),
-                'id': device.uniqueID(),
-                'model_id': device.modelID(),
-                'is_connected': device.isConnected(),
+        
+        # Add system audio capture capability as a special device
+        if include_system_audio:
+            system_audio_device = {
+                'name': 'System Audio',
+                'id': 'system_audio',
+                'type': 'system_capture',
+                'source': 'ScreenCaptureKit',
+                'description': 'Capture all system audio output',
+                'capabilities': ['system_audio_capture']
             }
-            device_list.append(device_info)
+            device_list.append(system_audio_device)
+        
+        # Get microphone devices using AVCaptureDevice (same as main.py)
+        if include_microphones:
+            try:
+                devices = AVCaptureDevice.devicesWithMediaType_(AVMediaTypeAudio)
+                for device in devices:
+                    mic_info = {
+                        'name': device.localizedName(),
+                        'id': device.uniqueID(),
+                        'unique_id': device.uniqueID(),  # For compatibility
+                        'model_id': device.modelID(),
+                        'is_connected': device.isConnected(),
+                        'type': 'microphone',
+                        'source': 'AVCapture',
+                        'capabilities': ['microphone_input']
+                    }
+                    device_list.append(mic_info)
+            except Exception as e:
+                logger.error(f"Error getting microphone devices: {e}")
         
         return device_list
     
-    def start_recording(self, config):
+    def list_microphones(self):
+        """List available microphone devices (same as main.py implementation)"""
+        # Get all audio input devices
+        devices = AVCaptureDevice.devicesWithMediaType_(AVMediaTypeAudio)
+        
+        microphones = []
+        for device in devices:
+            mic_info = {
+                'name': device.localizedName(),
+                'unique_id': device.uniqueID(),
+                'model_id': device.modelID(),
+                'is_connected': device.isConnected(),
+            }
+            microphones.append(mic_info)
+        
+        return microphones
+    
+    def start_recording(self, capture_system_audio=True, capture_microphone=False, 
+                       microphone_id=None, exclude_current_process=True):
         """Start audio recording with given configuration
         
         Args:
-            config: {
-                'capture_system_audio': bool,
-                'capture_microphone': bool,
-                'microphone_id': str (optional),
-                'selected_apps': list of bundle_ids (optional),
-                'exclude_current_process': bool
-            }
+            capture_system_audio: bool - Whether to capture system audio
+            capture_microphone: bool - Whether to capture microphone
+            microphone_id: str (optional) - Specific microphone device ID
+            exclude_current_process: bool - Whether to exclude current process audio
         """
         if self.is_recording:
             raise RuntimeError("Already recording")
         
-        # Get displays and apps
-        displays, apps = self._get_shareable_content()
+        # Get displays only (no app filtering needed)
+        displays, _ = self._get_shareable_content()
         if not displays:
             raise RuntimeError("No displays found")
         
-        # Setup content filter
+        # Setup content filter - capture all applications
         display = displays[0]
-        
-        # Filter applications if specified
-        if config.get('selected_apps'):
-            # Find applications to include
-            selected_app_objects = []
-            for app in apps:
-                if app.bundleIdentifier() in config['selected_apps']:
-                    selected_app_objects.append(app)
-            
-            # Create filter with only selected apps
-            filter = SCContentFilter.alloc().initWithDisplay_includingApplications_exceptingWindows_(
-                display, selected_app_objects, []
-            )
-        else:
-            # Capture all applications
-            filter = SCContentFilter.alloc().initWithDisplay_excludingApplications_exceptingWindows_(
-                display, [], []
-            )
+        filter = SCContentFilter.alloc().initWithDisplay_excludingApplications_exceptingWindows_(
+            display, [], []
+        )
         
         # Configure stream
         stream_config = SCStreamConfiguration.alloc().init()
-        stream_config.setCapturesAudio_(config.get('capture_system_audio', True))
-        stream_config.setExcludesCurrentProcessAudio_(config.get('exclude_current_process', True))
+        stream_config.setCapturesAudio_(capture_system_audio)
+        stream_config.setExcludesCurrentProcessAudio_(exclude_current_process)
+        stream_config.setChannelCount_(self.channels)
         
-        if config.get('capture_microphone'):
+        # Enable microphone capture if requested
+        if capture_microphone:
             stream_config.setCaptureMicrophone_(True)
-            if config.get('microphone_id'):
-                stream_config.setMicrophoneCaptureDeviceID_(config['microphone_id'])
+            if microphone_id:
+                stream_config.setMicrophoneCaptureDeviceID_(microphone_id)
+        else:
+            stream_config.setCaptureMicrophone_(False)
         
-        # Create delegate and stream
-        self.delegate = CaptureDelegate.alloc().initWithQueue_(self.pcm_queue)
+        # Create single delegate (like main.py) - handles both system and mic audio
+        self.delegate = self
+
+        # Create stream
         self.stream = SCStream.alloc().initWithFilter_configuration_delegate_(
             filter, stream_config, self.delegate
         )
         
-        # Add audio output
-        success, err = self.stream.addStreamOutput_type_sampleHandlerQueue_error_(
-            self.delegate, SCStreamOutputTypeAudio, None, None
-        )
-        if not success:
-            raise RuntimeError(f"Failed to add stream output: {err}")
+        # Add system audio output
+        if capture_system_audio:
+            success, err = self.stream.addStreamOutput_type_sampleHandlerQueue_error_(
+                self.delegate, SCStreamOutputTypeAudio, None, None
+            )
+            if not success:
+                raise RuntimeError(f"Failed to add audio stream output: {err}")
+        
+        # Add microphone output (using same delegate)
+        if capture_microphone:
+            success, err = self.stream.addStreamOutput_type_sampleHandlerQueue_error_(
+                self.delegate, SCStreamOutputTypeMicrophone, None, None
+            )
+            if not success:
+                logger.warning(f"Failed to add microphone stream output: {err}")
         
         # Start capture
         capture_started = [False]
@@ -193,17 +205,152 @@ class AudioCapture:
         except queue.Empty:
             return None
     
+    def get_mic_data(self, timeout=0.1):
+        """Get microphone audio data from separate queue
+        
+        Returns:
+            bytes: Microphone audio data or None if queue is empty
+        """
+        try:
+            return self.mic_queue.get(timeout=timeout)
+        except queue.Empty:
+            return None
+    
     def save_to_file(self, filename):
         """Save all queued audio to WAV file"""
         with wave.open(filename, "wb") as wf:
-            wf.setnchannels(2)  # Stereo
-            wf.setsampwidth(2)  # 16-bit
-            wf.setframerate(48000)  # 48kHz
+            wf.setnchannels(self.channels)
+            wf.setsampwidth(self.bit_depth // 8)  # Convert bits to bytes
+            wf.setframerate(self.sample_rate)
             while not self.pcm_queue.empty():
                 wf.writeframes(self.pcm_queue.get())
+
+    # delegate method
+    def stream_didOutputSampleBuffer_ofType_(self, stream, sampleBuffer, bufferType):
+        """Handle audio buffer callback (simplified like main.py)"""
+        # Process only audio and microphone types
+        if bufferType not in (SCStreamOutputTypeAudio, SCStreamOutputTypeMicrophone):
+            return
+        
+        try:
+            # Import Core Media functions
+            from CoreMedia import (
+                CMSampleBufferGetDataBuffer,
+                CMBlockBufferGetDataLength,
+                CMBlockBufferCopyDataBytes
+            )
+            from Foundation import NSMutableData
+
+            # 获取真实的 音频参数
+            if bufferType == SCStreamOutputTypeAudio and self.system_audio_format is None:
+                self._analyze_audio_format(sampleBuffer, bufferType)
+
+            if bufferType == SCStreamOutputTypeMicrophone and self.mic_audio_format is None:
+                self._analyze_audio_format(sampleBuffer, bufferType)
+            
+            # Get audio data buffer
+            dataBuffer = CMSampleBufferGetDataBuffer(sampleBuffer)
+            if not dataBuffer:
+                return
+            
+            # Get data length
+            length = CMBlockBufferGetDataLength(dataBuffer)
+            if length == 0:
+                return
+            
+            # Use safer data copy method (like main.py)
+            destinationBuffer = NSMutableData.dataWithLength_(length)
+            if not destinationBuffer:
+                return
+            
+            # Copy data
+            result = CMBlockBufferCopyDataBytes(dataBuffer, 0, length, destinationBuffer.mutableBytes())
+            
+            # Handle return value
+            error_code = 0
+            if isinstance(result, tuple):
+                error_code = result[0] if len(result) > 0 else 0
+            else:
+                error_code = result
+            
+            if error_code == 0:  # Success
+                # Get raw data
+                raw_data = destinationBuffer.bytes().tobytes()
+                
+                # Put data in appropriate queue based on buffer type
+                if bufferType == SCStreamOutputTypeMicrophone:
+                    self.mic_queue.put(raw_data)
+                elif bufferType == SCStreamOutputTypeAudio:
+                    self.pcm_queue.put(raw_data)
+                
+        except Exception as e:
+            logger.error(f"Error processing audio: {e}")
+            import traceback
+            traceback.print_exc()
+
+
+    def _analyze_audio_format(self, sampleBuffer, bufferType):
+        """分析音频格式信息"""
+        try:
+            from CoreMedia import (
+                CMSampleBufferGetFormatDescription,
+                CMAudioFormatDescriptionGetStreamBasicDescription
+            )
+            
+            # 确定流类型
+            stream_type = "麦克风" if bufferType == SCStreamOutputTypeMicrophone else "系统音频"
+            format_key = "microphone" if bufferType == SCStreamOutputTypeMicrophone else "system"
+            
+            # 初始化计数器
+            if not hasattr(self, 'format_analyzed'):
+                self.format_analyzed = {}
+            
+            # 每种类型只分析一次
+            if stream_type not in self.format_analyzed:
+                self.format_analyzed[stream_type] = True
+                
+                print(f"\n[音频格式分析] {stream_type}")
+                
+                # 获取格式描述
+                formatDesc = CMSampleBufferGetFormatDescription(sampleBuffer)
+                if formatDesc:
+                    try:
+                        # 使用Core Media API获取AudioStreamBasicDescription
+                        asbd = CMAudioFormatDescriptionGetStreamBasicDescription(formatDesc)
+                        if asbd:
+                            # 直接访问AudioStreamBasicDescription结构体的字段
+                            sample_rate = int(asbd.mSampleRate) if hasattr(asbd, 'mSampleRate') else 44100
+                            channels = int(asbd.mChannelsPerFrame) if hasattr(asbd, 'mChannelsPerFrame') else 1
+                            bit_depth = int(asbd.mBitsPerChannel) if hasattr(asbd, 'mBitsPerChannel') else 16
+
+                            # 保存系统音频格式
+                            if format_key == 'system':
+                                self.system_audio_format = {
+                                    'sample_rate': sample_rate,
+                                    'channels': channels,
+                                    'bit_depth': bit_depth
+                                }
+
+                            # 保存麦克风音频格式
+                            if format_key == 'microphone':
+                                self.microphone_audio_format = {
+                                    'sample_rate': sample_rate,
+                                    'channels': channels,
+                                    'bit_depth': bit_depth
+                                }
+                            
+                            print(f"[格式] {stream_type}: {sample_rate}Hz, {channels}声道, {bit_depth}位")
+
+                            
+                    except Exception as parse_error:
+                        print(f"格式解析失败: {parse_error}")
+                
+        except Exception as e:
+            print(f"格式分析错误: {e}")
+
     
     def _get_shareable_content(self):
-        """Get displays and applications"""
+        """Get displays for capture"""
         content_ref = [None]
         semaphore = threading.Semaphore(0)
         
@@ -224,23 +371,23 @@ class AudioCapture:
             return [], []
         
         displays = content.displays() if hasattr(content, 'displays') else []
-        apps = content.applications() if hasattr(content, 'applications') else []
-        return displays, apps
+        return displays, []
 
 
 class CaptureDelegate(NSObject):
-    """SCStreamDelegate implementation for receiving audio samples"""
+    """SCStreamDelegate implementation for receiving audio samples (simplified like main.py)"""
     
-    def initWithQueue_(self, audio_queue):
+    def initWithPcmQueue_micQueue_(self, pcm_queue, mic_queue):
         self = objc.super(CaptureDelegate, self).init()
         if self:
-            self.audio_queue = audio_queue
+            self.pcm_queue = pcm_queue
+            self.mic_queue = mic_queue
         return self
     
     def stream_didOutputSampleBuffer_ofType_(self, stream, sampleBuffer, bufferType):
-        """Handle audio buffer callback"""
-        # Only process audio
-        if bufferType != SCStreamOutputTypeAudio:
+        """Handle audio buffer callback (simplified like main.py)"""
+        # Process only audio and microphone types
+        if bufferType not in (SCStreamOutputTypeAudio, SCStreamOutputTypeMicrophone):
             return
         
         try:
@@ -248,8 +395,9 @@ class CaptureDelegate(NSObject):
             from CoreMedia import (
                 CMSampleBufferGetDataBuffer,
                 CMBlockBufferGetDataLength,
-                CMBlockBufferGetDataPointer
+                CMBlockBufferCopyDataBytes
             )
+            from Foundation import NSMutableData
             
             # Get audio data buffer
             dataBuffer = CMSampleBufferGetDataBuffer(sampleBuffer)
@@ -261,37 +409,30 @@ class CaptureDelegate(NSObject):
             if length == 0:
                 return
             
-            # Get data pointer
-            result = CMBlockBufferGetDataPointer(
-                dataBuffer, 0, None, None, None
-            )
-            
-            if isinstance(result, tuple) and len(result) >= 4:
-                err = result[0]
-                data_pointer_info = result[3]
-                if isinstance(data_pointer_info, tuple) and len(data_pointer_info) > 0:
-                    data_pointer = data_pointer_info[0]
-                else:
-                    data_pointer = None
-            else:
-                logger.error(f"Unexpected result from CMBlockBufferGetDataPointer: {result}")
+            # Use safer data copy method (like main.py)
+            destinationBuffer = NSMutableData.dataWithLength_(length)
+            if not destinationBuffer:
                 return
             
-            if err == 0 and data_pointer and length > 0:
-                # Create buffer from pointer address
-                import ctypes
-                buffer = (ctypes.c_char * length).from_address(data_pointer)
-                raw_data = bytes(buffer)
+            # Copy data
+            result = CMBlockBufferCopyDataBytes(dataBuffer, 0, length, destinationBuffer.mutableBytes())
+            
+            # Handle return value
+            error_code = 0
+            if isinstance(result, tuple):
+                error_code = result[0] if len(result) > 0 else 0
+            else:
+                error_code = result
+            
+            if error_code == 0:  # Success
+                # Get raw data
+                raw_data = destinationBuffer.bytes().tobytes()
                 
-                # Convert 32-bit float to 16-bit integer
-                float_data = struct.unpack(f'{length//4}f', raw_data)
-                
-                # Convert to 16-bit integer
-                int_data = np.array(float_data) * 32767
-                int_data = np.clip(int_data, -32768, 32767).astype(np.int16)
-                
-                # Put in queue
-                self.audio_queue.put(int_data.tobytes())
+                # Put data in appropriate queue based on buffer type
+                if bufferType == SCStreamOutputTypeMicrophone:
+                    self.mic_queue.put(raw_data)
+                elif bufferType == SCStreamOutputTypeAudio:
+                    self.pcm_queue.put(raw_data)
                 
         except Exception as e:
             logger.error(f"Error processing audio: {e}")

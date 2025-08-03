@@ -1,3 +1,102 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
+
+/* Custom Button Styles */
+.btn-primary {
+  @apply bg-gradient-to-r from-blue-500 to-purple-500 hover:from-blue-600 hover:to-purple-600 
+         transform transition-all duration-300 hover:scale-105 active:scale-95 
+         focus:outline-none focus:ring-4 focus:ring-blue-200;
+}
+
+.btn-secondary {
+  @apply bg-gradient-to-r from-purple-500 to-pink-500 hover:from-purple-600 hover:to-pink-600 
+         transform transition-all duration-300 hover:scale-105 active:scale-95 
+         focus:outline-none focus:ring-4 focus:ring-purple-200;
+}
+
+.btn-neutral {
+  @apply bg-gradient-to-r from-gray-600 to-gray-700 hover:from-gray-700 hover:to-gray-800 
+         transform transition-all duration-300 hover:scale-105 active:scale-95 
+         focus:outline-none focus:ring-4 focus:ring-gray-200;
+}
+
+/* Card Gradient Background */
+.card-gradient {
+  @apply bg-gradient-to-br from-white/90 to-gray-50/90 backdrop-blur-sm;
+}
+
+/* Glass Effect */
+.glass {
+  @apply bg-white/30 backdrop-blur-md border border-white/20;
+}
+
+/* Status Indicators */
+.status-connected {
+  @apply bg-green-500;
+  animation: pulse 2s infinite;
+}
+
+.status-disconnected {
+  @apply bg-red-500;
+}
+
+/* Recording Pulse Animation */
+.recording-pulse {
+  animation: recording-pulse 1.5s infinite;
+}
+
+@keyframes recording-pulse {
+  0%, 100% {
+    opacity: 1;
+    transform: scale(1);
+  }
+  50% {
+    opacity: 0.6;
+    transform: scale(1.1);
+  }
+}
+
+/* Fade In Animation */
+.animate-fade-in {
+  animation: fade-in 0.6s ease-out;
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+    transform: translateY(20px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+/* Button Disabled States */
+.btn-primary:disabled,
+.btn-secondary:disabled,
+.btn-neutral:disabled {
+  @apply opacity-50 cursor-not-allowed;
+  transform: none !important;
+}
+
+.btn-primary:disabled:hover,
+.btn-secondary:disabled:hover,
+.btn-neutral:disabled:hover {
+  transform: none !important;
+}
+
+/* Focus States for Accessibility */
+button:focus-visible {
+  @apply outline-none ring-4 ring-blue-200;
+}
+
+/* Custom Input Styles */
+input:focus,
+select:focus {
+  @apply outline-none ring-4 ring-blue-200;
+}
+
+/* Smooth Transitions */
+* {
+  @apply transition-colors duration-200;
+}

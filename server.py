@@ -2,6 +2,7 @@
 import os
 import time
 import logging
+import json
 from functools import wraps
 from flask import Flask, render_template, send_from_directory, request
 from flask_socketio import SocketIO, emit
@@ -20,6 +21,7 @@ app = Flask(__name__,
             static_folder='frontend/static',
             template_folder='frontend')
 app.config.from_object(Config)
+app.debug = Config.DEBUG
 
 CORS(app)
 
@@ -63,24 +65,39 @@ def handle_socketio_error(f):
             return None
     return decorated_function
 
-@app.route('/')
-def index():
-    return render_template('index.html')
+
+@app.route('/test')
+def test():
+    return 'Test'
 
 @app.route('/static/<path:path>')
 def send_static(path):
     return send_from_directory('frontend/static', path)
 
+@app.errorhandler(404)
+def not_found(error):
+    """Handle 404 errors gracefully"""
+    # For service worker requests, return a minimal response
+    if 'serviceWorker' in request.path or request.path.endswith('sw.js'):
+        logger.info(f"Service worker request ignored: {request.path}")
+        return '', 404
+    
+    # For other 404s, you can customize the response
+    logger.warning(f"404 Not Found: {request.path}")
+    return {'error': 'Not found'}, 404
+
 @socketio.on('connect')
-@handle_socketio_error
 def handle_connect():
-    logger.info(f"Client connected: {request.sid}")
-    connected_clients.add(request.sid)
-    emit('connection_status', {
-        'status': 'connected',
-        'client_id': request.sid,
-        'timestamp': time.time()
-    })
+    try:
+        logger.info(f"Client connected: {request.sid}")
+        connected_clients.add(request.sid)
+        emit('connection_status', {
+            'status': 'connected',
+            'client_id': request.sid,
+            'timestamp': time.time()
+        })
+    except Exception as e:
+        logger.error(f"Error in handle_connect: {str(e)}", exc_info=True)
 
 @socketio.on('disconnect')
 def handle_disconnect():
@@ -90,42 +107,114 @@ def handle_disconnect():
 
 @socketio.on('ping')
 @handle_socketio_error
-def handle_ping():
+def handle_ping(data=None):
     emit('pong', {'timestamp': time.time()})
 
-@socketio.on('get_audio_sources')
+
+@socketio.on('get_audio_devices')
 @handle_socketio_error
-def handle_get_audio_sources():
-    """Get available audio sources (apps and devices)"""
+def handle_get_audio_devices(data=None):
+    """Get available audio input devices for settings page"""
+    logger.info("Requesting audio devices")
     try:
-        apps = audio_capture.list_applications()
         devices = audio_capture.list_audio_devices()
-        emit('audio_sources', {
-            'applications': apps,
-            'devices': devices
+        logger.info(f"Available audio devices: {devices}")
+        
+        # Format devices for frontend
+        formatted_devices = []
+        
+        # Always add default system device first
+        formatted_devices.append({
+            'id': 'default',
+            'name': '系统默认麦克风',
+            'type': 'builtin'
         })
+        
+        for device in devices:
+            if isinstance(device, dict):
+                device_name = device.get('name', 'Unknown Device')
+                device_id = device.get('id')
+                
+                # Determine device type based on various fields
+                device_type = 'builtin'
+                if device.get('type') == 'system_capture':
+                    device_type = 'builtin'
+                elif device.get('source') == 'AVCapture':
+                    device_type = 'builtin'
+                elif 'bluetooth' in device_name.lower() or 'airpods' in device_name.lower():
+                    device_type = 'bluetooth'
+                elif 'usb' in device_name.lower() or device.get('transport') == 'USB':
+                    device_type = 'usb'
+                elif device.get('type') == 'microphone':
+                    device_type = 'builtin'
+                
+                formatted_devices.append({
+                    'id': device_id,
+                    'name': device_name,
+                    'type': device_type
+                })
+            else:
+                # Device is likely a string, create structure
+                device_str = str(device)
+                formatted_devices.append({
+                    'id': device_str,
+                    'name': device_str,
+                    'type': 'builtin'
+                })
+
+        print(json.dumps(formatted_devices, indent=4, ensure_ascii=False))
+        emit('audio_devices', formatted_devices)
+       
     except Exception as e:
-        logger.error(f"Error getting audio sources: {e}")
-        emit('error', {'message': str(e)})
+        logger.error(f"Error getting audio devices: {e}")
+        emit('audio_devices_error', {'error': str(e)})
 
 @socketio.on('start_recording')
 @handle_socketio_error
 def handle_start_recording(data):
     logger.info(f"Starting recording with config: {data}")
     try:
-        # Configure audio capture
+        # 从前端接收的参数
+        audio_device_id = data.get('audioDevice', 'default')
+        capture_system_audio = data.get('captureSystemAudio', True)
+        source_language = data.get('sourceLanguage', 'zh')
+        target_language = data.get('targetLanguage', 'en')
+        
+        # 根据选择的音频设备决定捕获模式
+        if audio_device_id == 'system_audio':
+            # 只捕获系统音频
+            capture_microphone = False
+            microphone_id = None
+        elif audio_device_id == 'default':
+            # 使用默认麦克风
+            capture_microphone = True
+            microphone_id = None  # None 表示使用系统默认麦克风
+        else:
+            # 使用特定的麦克风设备
+            capture_microphone = True
+            microphone_id = audio_device_id
+        
+        # 配置音频捕获
         config = {
-            'capture_system_audio': data.get('captureSystemAudio', True),
-            'capture_microphone': data.get('captureMicrophone', False),
-            'microphone_id': data.get('microphoneId'),
-            'selected_apps': data.get('selectedApps', []),
+            'capture_system_audio': capture_system_audio,
+            'capture_microphone': capture_microphone,
+            'microphone_id': microphone_id,
+            'selected_apps': [],  # 暂时捕获所有应用
             'exclude_current_process': True
         }
+        
+        # 存储语言设置用于 ASR/翻译
+        global asr_config
+        asr_config['source_language'] = source_language
+        asr_config['target_language'] = target_language
+
+        logger.info(f"Audio capture config: {json.dumps(config, indent=2)}")
+        logger.info(f"Language settings - Source: {source_language}, Target: {target_language}")
         
         audio_capture.start_recording(config)
         emit('recording_started', {'status': 'success'})
         
-        # Start audio streaming in background
+        # 启动音频流处理任务
         socketio.start_background_task(stream_audio_data)
         
     except Exception as e:
@@ -134,7 +223,7 @@ def handle_start_recording(data):
 
 @socketio.on('stop_recording')
 @handle_socketio_error
-def handle_stop_recording():
+def handle_stop_recording(data=None):
     logger.info("Stopping recording")
     try:
         audio_capture.stop_recording()
@@ -288,7 +377,7 @@ def stream_audio_data():
         translation_service.stop()
 
 if __name__ == '__main__':
-    port = int(os.environ.get('PORT', 5000))
+    port = int(os.environ.get('PORT', 5001))
     logger.info(f"Starting TransFlow server on port {port}")
     socketio.run(app, 
                  host='0.0.0.0', 
