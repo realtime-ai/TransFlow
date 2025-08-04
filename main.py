@@ -1,6 +1,7 @@
 from pickle import TRUE
 import objc
 import time
+import argparse
 
 from Foundation import NSObject, NSRunLoop, NSDate
 from AVFoundation import AVCaptureDevice, AVMediaTypeAudio
@@ -265,7 +266,8 @@ def list_microphones():
 
 def record_system_audio(duration_seconds=10, output_path="system_audio.wav", 
                        capture_mic=True, mic_device_id=None,
-                       sample_rate=16000, channels=1, bit_depth=16):
+                       sample_rate=16000, channels=1, bit_depth=16,
+                       mic_only=False):
     """录制系统所有应用的声音到 WAV 文件
     
     Args:
@@ -276,6 +278,7 @@ def record_system_audio(duration_seconds=10, output_path="system_audio.wav",
         sample_rate: 采样率（默认16000 Hz）
         channels: 通道数（默认1，单声道）
         bit_depth: 位深度（默认16位）
+        mic_only: 仅录制麦克风音频，不录制系统音频
     """
     # 清理旧的队列数据
     global pcm_queue, mic_queue
@@ -293,8 +296,19 @@ def record_system_audio(duration_seconds=10, output_path="system_audio.wav",
         mics = list_microphones()
         if mics:
             if mic_device_id is None:
-                mic_device_id = mics[0]['unique_id']
-                print(f"使用默认麦克风: {mics[0]['name']}")
+                # 优先选择名称中包含 "Microphone" 的设备
+                default_mic = None
+                for mic in mics:
+                    if 'Microphone' in mic['name']:
+                        default_mic = mic
+                        break
+                
+                # 如果没找到包含 "Microphone" 的设备，使用第一个
+                if default_mic is None:
+                    default_mic = mics[0]
+                
+                mic_device_id = default_mic['unique_id']
+                print(f"使用默认麦克风: {default_mic['name']}")
         else:
             print("未找到可用的麦克风设备")
             capture_mic = False
@@ -309,8 +323,11 @@ def record_system_audio(duration_seconds=10, output_path="system_audio.wav",
 
     # 配置流：启用音频并排除当前进程的声音
     config = SCStreamConfiguration.alloc().init()
-    config.setCapturesAudio_(True)
-    config.setExcludesCurrentProcessAudio_(True)
+    if not mic_only:
+        config.setCapturesAudio_(True)
+        config.setExcludesCurrentProcessAudio_(True)
+    else:
+        config.setCapturesAudio_(False)
     
     # 不强制设置采样率，让系统使用默认值以避免重采样噪音
     # config.setSampleRate_(sample_rate)
@@ -333,9 +350,10 @@ def record_system_audio(duration_seconds=10, output_path="system_audio.wav",
     stream = SCStream.alloc().initWithFilter_configuration_delegate_(filter, config, delegate)
     
     # 添加系统音频输出
-    success, err = stream.addStreamOutput_type_sampleHandlerQueue_error_(delegate, SCStreamOutputTypeAudio, None, None)
-    if not success:
-        raise RuntimeError(f"添加系统音频流输出失败: {err}")
+    if not mic_only:
+        success, err = stream.addStreamOutput_type_sampleHandlerQueue_error_(delegate, SCStreamOutputTypeAudio, None, None)
+        if not success:
+            raise RuntimeError(f"添加系统音频流输出失败: {err}")
     
     # 如果启用麦克风捕获，添加麦克风输出（使用同一个委托）
     if capture_mic:
@@ -367,7 +385,9 @@ def record_system_audio(duration_seconds=10, output_path="system_audio.wav",
         raise RuntimeError("启动捕获失败")
 
     print(f"开始录制 {duration_seconds} 秒...")
-    if capture_mic:
+    if mic_only:
+        print("仅录制麦克风音频")
+    elif capture_mic:
         print("同时录制系统音频和麦克风音频（分离模式）")
     else:
         print("仅录制系统音频")
@@ -430,62 +450,63 @@ def record_system_audio(duration_seconds=10, output_path="system_audio.wav",
 
     # 将队列中的音频数据写入 WAV
     # 保存系统音频（使用重采样器统一转换为16kHz, 单声道, int16）
-    system_format = audio_formats['system']
-    system_output_path = output_path.replace('.wav', '_system.wav') if capture_mic else output_path
+    if not mic_only and 'system' in audio_formats:
+        system_format = audio_formats['system']
+        system_output_path = output_path.replace('.wav', '_system.wav') if capture_mic else output_path
     
-    print(f"[保存] 系统音频重采样: {system_format['sample_rate']}Hz/{system_format['channels']}ch → 16kHz/1ch")
+        print(f"[保存] 系统音频重采样: {system_format['sample_rate']}Hz/{system_format['channels']}ch → 16kHz/1ch")
     
-    # 收集所有音频数据并使用重采样器处理
-    resampled_chunks = []
-    packet_count = 0
-    
-    while not pcm_queue.empty():
-        raw_data = pcm_queue.get()
-        packet_count += 1
+        # 收集所有音频数据并使用重采样器处理
+        resampled_chunks = []
+        packet_count = 0
         
-        if system_resampler:
-            try:
-                # 使用重采样器处理数据
-                resampled_data, _ = system_resampler.resample(raw_data)
-                if len(resampled_data) > 0:
-                    resampled_chunks.append(resampled_data)
-                    
-                # 调试信息（只打印前5个包）
-                if packet_count <= 5:
-                    print(f"[重采样] 包#{packet_count}: {len(raw_data)}字节 -> {len(resampled_data)}样本")
-                    
-            except Exception as e:
-                print(f"重采样失败 包#{packet_count}: {e}")
+        while not pcm_queue.empty():
+            raw_data = pcm_queue.get()
+            packet_count += 1
+            
+            if system_resampler:
+                try:
+                    # 使用重采样器处理数据
+                    resampled_data, _ = system_resampler.resample(raw_data)
+                    if len(resampled_data) > 0:
+                        resampled_chunks.append(resampled_data)
+                        
+                    # 调试信息（只打印前5个包）
+                    if packet_count <= 5:
+                        print(f"[重采样] 包#{packet_count}: {len(raw_data)}字节 -> {len(resampled_data)}样本")
+                        
+                except Exception as e:
+                    print(f"重采样失败 包#{packet_count}: {e}")
+            else:
+                print(f"警告: 系统音频重采样器未初始化")
+    
+        print(f"[调试] 总共处理了 {packet_count} 个数据包")
+        
+        # 合并重采样后的数据
+        if resampled_chunks:
+            final_audio_data = np.concatenate(resampled_chunks, axis=0)
+            
+            # 保存为16kHz, 单声道, int16
+            sf.write(
+                system_output_path, 
+                final_audio_data, 
+                16000,  # 固定16kHz
+                subtype='PCM_16',  # 固定int16
+                format='WAV'
+            )
+            
+            total_samples = len(final_audio_data)
+            actual_duration = total_samples / 16000  # 固定16kHz采样率
+            
+            print(f"系统音频已保存到 {system_output_path}")
+            print(f"[统计] 系统音频: {total_samples} 样本, 实际时长: {actual_duration:.2f}秒 (16kHz, 单声道, int16)")
         else:
-            print(f"警告: 系统音频重采样器未初始化")
-    
-    print(f"[调试] 总共处理了 {packet_count} 个数据包")
-    
-    # 合并重采样后的数据
-    if resampled_chunks:
-        final_audio_data = np.concatenate(resampled_chunks, axis=0)
-        
-        # 保存为16kHz, 单声道, int16
-        sf.write(
-            system_output_path, 
-            final_audio_data, 
-            16000,  # 固定16kHz
-            subtype='PCM_16',  # 固定int16
-            format='WAV'
-        )
-        
-        total_samples = len(final_audio_data)
-        actual_duration = total_samples / 16000  # 固定16kHz采样率
-        
-        print(f"系统音频已保存到 {system_output_path}")
-        print(f"[统计] 系统音频: {total_samples} 样本, 实际时长: {actual_duration:.2f}秒 (16kHz, 单声道, int16)")
-    else:
-        print("警告: 没有系统音频数据可保存")
+            print("警告: 没有系统音频数据可保存")
     
     # 保存麦克风音频（使用重采样器统一转换为16kHz, 单声道, int16）
     if capture_mic and not mic_queue.empty():
         mic_format = audio_formats['microphone']
-        mic_output_path = output_path.replace('.wav', '_microphone.wav')
+        mic_output_path = output_path.replace('.wav', '_microphone.wav') if not mic_only else output_path
         
         print(f"[保存] 麦克风音频重采样: {mic_format['sample_rate']}Hz/{mic_format['channels']}ch → 16kHz/1ch")
         
@@ -541,7 +562,8 @@ def record_system_audio(duration_seconds=10, output_path="system_audio.wav",
 
 def record_audio(duration_seconds=10, output_path="recording.wav", 
                 capture_mic=True, mic_device_id=None,
-                sample_rate=16000, channels=1, bit_depth=16):
+                sample_rate=16000, channels=1, bit_depth=16,
+                mic_only=False):
     """录制音频功能
     
     Args:
@@ -552,45 +574,92 @@ def record_audio(duration_seconds=10, output_path="recording.wav",
         sample_rate: 采样率（默认16000 Hz）
         channels: 通道数（默认1，单声道）
         bit_depth: 位深度（默认16位）
+        mic_only: 仅录制麦克风音频，不录制系统音频
     """
     # 直接调用录制函数
     record_system_audio(duration_seconds, output_path, capture_mic, mic_device_id,
-                       sample_rate, channels, bit_depth)
+                       sample_rate, channels, bit_depth, mic_only)
 
 
 
 if __name__ == '__main__':
-    # 可以通过命令行参数选择不同的录制模式
+    # 解析命令行参数
+    parser = argparse.ArgumentParser(description='录制系统音频和/或麦克风音频')
+    parser.add_argument('-d', '--duration', type=int, default=10, help='录制时长（秒）')
+    parser.add_argument('-o', '--output', type=str, default='recording.wav', help='输出文件路径')
+    parser.add_argument('--mic-only', action='store_true', help='仅录制麦克风音频')
+    parser.add_argument('--no-mic', action='store_true', help='不录制麦克风')
+    parser.add_argument('--list-mics', action='store_true', help='列出可用的麦克风设备')
+    parser.add_argument('--mic-id', type=str, help='指定麦克风设备ID')
     
-    # 测试麦克风设备选择
-    print("=== 获取可用麦克风设备 ===")
-    mics = list_microphones()
-    default_mic = None
-    if mics:
-        print("可用的麦克风设备:")
-        for i, mic in enumerate(mics):
-            print(f"  {i}: {mic['name']} (ID: {mic['unique_id']})")
-            if 'macbook' in mic['name'].lower() or 'microphone' in mic['name'].lower():
-                print(f"    -> 检测到内置麦克风: {mic['name']}")
-                default_mic = mic
-        
-        # 选择默认内置麦克风（通常是第一个）
-        default_mic = mics[0] if default_mic is None else default_mic
-        print(f"\n使用默认麦克风进行测试: {default_mic['name']}")
-        print(f"设备ID: {default_mic['unique_id']}")
-        
-        # 录制测试
-        record_audio(10, "test_recording.wav", 
-                    capture_mic=True,
-                    mic_device_id=default_mic['unique_id'])
+    args = parser.parse_args()
+    
+    # 列出麦克风设备
+    if args.list_mics:
+        print("=== 可用的麦克风设备 ===")
+        mics = list_microphones()
+        if mics:
+            for i, mic in enumerate(mics):
+                print(f"  {i}: {mic['name']}")
+                print(f"     ID: {mic['unique_id']}")
+                print(f"     Model: {mic['model_id']}")
+                print(f"     Connected: {mic['is_connected']}")
+                print()
+        else:
+            print("未找到可用的麦克风设备")
+        exit(0)
+    
+    # 确定录制模式
+    capture_mic = not args.no_mic
+    mic_only = args.mic_only
+    
+    # 处理参数冲突
+    if args.no_mic and args.mic_only:
+        print("错误: --no-mic 和 --mic-only 不能同时使用")
+        exit(1)
+    
+    # 获取默认麦克风
+    mic_device_id = args.mic_id
+    if capture_mic and not mic_device_id:
+        mics = list_microphones()
+        if mics:
+            # 优先选择名称中包含 "Microphone" 的设备
+            default_mic = None
+            for mic in mics:
+                if 'Microphone' in mic['name']:
+                    default_mic = mic
+            
+            # 如果没找到包含 "Microphone" 的设备，使用第一个
+            if default_mic is None:
+                default_mic = mics[0]
+            
+            mic_device_id = default_mic['unique_id']
+            print(f"使用默认麦克风: {default_mic['name']}")
+        else:
+            print("未找到可用的麦克风设备")
+            capture_mic = False
+            if mic_only:
+                print("错误: --mic-only 模式需要可用的麦克风")
+                exit(1)
+    
+    # 开始录制
+    print(f"\n=== 录制参数 ===")
+    print(f"时长: {args.duration} 秒")
+    print(f"输出: {args.output}")
+    if mic_only:
+        print("模式: 仅麦克风")
+    elif capture_mic:
+        print("模式: 系统音频 + 麦克风")
     else:
-        print("未找到可用的麦克风设备")
+        print("模式: 仅系统音频")
+    print()
     
-    # 示例2：仅录制系统音频（16kHz, 单声道）
-    # print("=== 仅录制系统音频（16kHz, 单声道） ===")
-    # record_audio(5, "system_only_16k_mono.wav", 
-    #             capture_mic=False,
-    #             sample_rate=16000,
-    #             channels=1,
-    #             bit_depth=16)
+    # 执行录制
+    record_audio(
+        duration_seconds=args.duration,
+        output_path=args.output,
+        capture_mic=capture_mic,
+        mic_device_id=mic_device_id,
+        mic_only=mic_only
+    )
     
