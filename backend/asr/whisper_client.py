@@ -11,28 +11,30 @@ import time
 from pathlib import Path
 import tempfile
 
+from .base import ASRBase, ASRResult, ASRError
+
 logger = logging.getLogger(__name__)
 
 
-class WhisperClient:
+class WhisperClient(ASRBase):
     """OpenAI Whisper API client for real-time speech recognition"""
     
-    def __init__(self, api_key: str, model: str = "whisper-1"):
+    def __init__(self, api_key: str, model: str = "whisper-1", **kwargs):
+        super().__init__(api_key=api_key, model=model, **kwargs)
         self.client = OpenAI(api_key=api_key)
         self.model = model
         self.audio_buffer = queue.Queue()
         self.is_processing = False
         self.processing_thread = None
-        self.callback = None
         self.language = None  # Auto-detect by default
         
-        # Audio parameters
-        self.sample_rate = 48000
-        self.channels = 2
-        self.sample_width = 2  # 16-bit
+        # Audio parameters (can be overridden by kwargs)
+        self.sample_rate = kwargs.get('sample_rate', 48000)
+        self.channels = kwargs.get('channels', 2)
+        self.sample_width = kwargs.get('sample_width', 2)  # 16-bit
         
         # Buffer settings
-        self.buffer_duration = 5  # seconds
+        self.buffer_duration = kwargs.get('buffer_duration', 5)  # seconds
         self.buffer_size = self.sample_rate * self.channels * self.sample_width * self.buffer_duration
         self.current_buffer = bytearray()
         
@@ -46,24 +48,24 @@ class WhisperClient:
                      None for auto-detection
         """
         self.language = language
-        logger.info(f"Language set to: {language or 'auto-detect'}")
+        super().set_language(language)
     
-    def set_callback(self, callback: Callable[[Dict[str, Any]], None]):
-        """Set callback function for recognition results
-        
-        Args:
-            callback: Function that receives recognition results
-                     Format: {'text': str, 'language': str, 'timestamp': float}
-        """
-        self.callback = callback
+    # set_callback is inherited from base class
     
-    def add_audio_data(self, audio_data: bytes):
+    def add_audio_data(self, audio_data: bytes, 
+                      sample_rate: Optional[int] = None,
+                      channels: Optional[int] = None,
+                      sample_width: Optional[int] = None) -> None:
         """Add audio data to the buffer for processing
         
         Args:
             audio_data: Raw audio bytes (16-bit PCM)
+            sample_rate: Sample rate in Hz (if different from configured)
+            channels: Number of channels (if different from configured)
+            sample_width: Sample width in bytes (if different from configured)
         """
         if self.is_processing:
+            # TODO: Handle different audio formats if provided
             self.audio_buffer.put(audio_data)
     
     def start(self):
@@ -73,6 +75,7 @@ class WhisperClient:
             return
         
         self.is_processing = True
+        self.is_running = True
         self.processing_thread = threading.Thread(target=self._process_audio_loop)
         self.processing_thread.daemon = True
         self.processing_thread.start()
@@ -84,6 +87,7 @@ class WhisperClient:
             return
         
         self.is_processing = False
+        self.is_running = False
         if self.processing_thread:
             self.processing_thread.join(timeout=5)
         
@@ -163,13 +167,15 @@ class WhisperClient:
                 
                 # Process response
                 if response.text:
-                    result = {
-                        'text': response.text,
-                        'language': getattr(response, 'language', self.language or 'unknown'),
-                        'timestamp': time.time()
-                    }
+                    result = ASRResult(
+                        text=response.text,
+                        language=getattr(response, 'language', self.language),
+                        timestamp=time.time(),
+                        is_final=True,
+                        metadata={'model': self.model}
+                    )
                     
-                    logger.debug(f"Transcription: {result['text']}")
+                    logger.debug(f"Transcription: {result.text}")
                     
                     if self.callback:
                         self.callback(result)
@@ -180,34 +186,28 @@ class WhisperClient:
         except Exception as e:
             logger.error(f"Error processing audio with Whisper: {e}")
     
-    def transcribe_file(self, file_path: str) -> Optional[Dict[str, Any]]:
-        """Transcribe an audio file
-        
-        Args:
-            file_path: Path to the audio file
-            
-        Returns:
-            Transcription result or None if failed
-        """
-        try:
-            with open(file_path, 'rb') as audio_file:
-                params = {
-                    "model": self.model,
-                    "file": audio_file,
-                    "response_format": "json",
-                }
-                
-                if self.language:
-                    params["language"] = self.language
-                
-                response = self.client.audio.transcriptions.create(**params)
-                
-                return {
-                    'text': response.text,
-                    'language': getattr(response, 'language', self.language or 'unknown'),
-                    'timestamp': time.time()
-                }
-                
-        except Exception as e:
-            logger.error(f"Error transcribing file {file_path}: {e}")
-            return None
+    
+    def get_capabilities(self) -> Dict[str, Any]:
+        """Get Whisper API capabilities"""
+        return {
+            'realtime': False,  # Whisper API is not real-time streaming
+            'streaming': False,
+            'max_audio_length': 25 * 1024 * 1024,  # 25MB file size limit
+            'supported_formats': ['flac', 'mp3', 'mp4', 'mpeg', 'mpga', 'm4a', 'ogg', 'wav', 'webm'],
+            'languages': ['af', 'ar', 'hy', 'az', 'be', 'bs', 'bg', 'ca', 'zh', 'hr', 'cs', 'da', 
+                         'nl', 'en', 'et', 'fi', 'fr', 'gl', 'de', 'el', 'he', 'hi', 'hu', 'is', 
+                         'id', 'it', 'ja', 'kn', 'kk', 'ko', 'lv', 'lt', 'mk', 'ms', 'mr', 'mi', 
+                         'ne', 'no', 'fa', 'pl', 'pt', 'ro', 'ru', 'sr', 'sk', 'sl', 'es', 'sw', 
+                         'sv', 'tl', 'ta', 'th', 'tr', 'uk', 'ur', 'vi', 'cy'],
+            'models': ['whisper-1'],
+            'features': {
+                'language_detection': True,
+                'timestamps': False,  # Word-level timestamps not available via API
+                'speaker_diarization': False,
+                'punctuation': True,
+            }
+        }
+    
+    def get_supported_languages(self) -> Optional[list[str]]:
+        """Get list of supported languages"""
+        return self.get_capabilities()['languages']

@@ -10,8 +10,8 @@ from flask_cors import CORS
 
 from config import Config
 from backend.audio.capture import AudioCapture
-from backend.asr.whisper_client import WhisperClient as ASRWhisperClient
-from backend.asr.audio_buffer import SmartAudioBuffer
+from backend.asr import create_asr, OpenAIRealtimeASR
+# from backend.asr.audio_buffer import SmartAudioBuffer  # Not needed for OpenAI Realtime
 from backend.models.translation_service import TranslationService
 
 logging.basicConfig(level=logging.INFO)
@@ -32,11 +32,12 @@ socketio = SocketIO(app,
                     ping_timeout=Config.SOCKETIO_PING_TIMEOUT,
                     ping_interval=Config.SOCKETIO_PING_INTERVAL)
 
-# Initialize audio capture
+# Initialize audio capture with 16kHz mono for OpenAI Realtime compatibility
 audio_capture = AudioCapture()
+audio_capture.init(sample_rate=16000, channels=1, bit_depth=16)
 
 # Initialize ASR components
-whisper_client = None
+asr_client = None
 audio_buffer = None
 translation_service = None
 
@@ -211,7 +212,7 @@ def handle_start_recording(data):
         logger.info(f"Audio capture config: {json.dumps(config, indent=2)}")
         logger.info(f"Language settings - Source: {source_language}, Target: {target_language}")
         
-        audio_capture.start_recording(config)
+        audio_capture.start_recording(**config)
         emit('recording_started', {'status': 'success'})
         
         # 启动音频流处理任务
@@ -264,9 +265,9 @@ def handle_set_languages(data):
         asr_config['source_language'] = data.get('sourceLanguage')
         asr_config['target_language'] = data.get('targetLanguage', 'en')
         
-        # Update whisper client if it exists
-        if whisper_client:
-            whisper_client.set_language(asr_config['source_language'])
+        # Update ASR client if it exists
+        if asr_client:
+            asr_client.set_language(asr_config['source_language'])
         
         # Update translation service if it exists
         if translation_service:
@@ -286,11 +287,11 @@ def handle_set_languages(data):
 
 def on_transcription_result(result):
     """Callback for ASR transcription results"""
-    logger.info(f"Transcription: {result['text']}")
+    logger.info(f"Transcription: {result.text}")
     socketio.emit('transcription', {
-        'text': result['text'],
-        'language': result['language'],
-        'timestamp': result['timestamp']
+        'text': result.text,
+        'language': result.language,
+        'timestamp': result.timestamp
     })
     
     # Feed transcription to translation service
@@ -309,37 +310,60 @@ def on_translation_result(result):
         'error': result.get('error')
     })
 
-def on_audio_chunk(audio_data, timestamp):
-    """Callback for audio buffer chunks"""
-    if whisper_client:
-        whisper_client.add_audio_data(audio_data)
+# on_audio_chunk function not needed with direct streaming
 
 def stream_audio_data():
     """Stream audio data to client and ASR"""
-    global whisper_client, audio_buffer, translation_service
+    global asr_client, audio_buffer, translation_service
     
-    # Initialize Whisper client if API key is available
-    if Config.OPENAI_API_KEY and not whisper_client:
+    # Initialize OpenAI ASR client if API key is available
+    if Config.OPENAI_API_KEY and not asr_client:
         try:
-            whisper_client = ASRWhisperClient(
-                api_key=Config.OPENAI_API_KEY,
-                model=Config.OPENAI_MODEL_WHISPER
-            )
-            whisper_client.set_callback(on_transcription_result)
-            whisper_client.set_language(asr_config['source_language'])
-            whisper_client.start()
-            logger.info("Whisper client initialized and started")
-            
-            # Initialize audio buffer
-            audio_buffer = SmartAudioBuffer(
-                sample_rate=Config.AUDIO_SAMPLE_RATE,
-                channels=Config.AUDIO_CHANNELS,
-                chunk_duration=Config.AUDIO_CHUNK_DURATION,
-                overlap_duration=0.5
-            )
-            audio_buffer.set_chunk_callback(on_audio_chunk)
-            audio_buffer.start()
-            logger.info("Audio buffer initialized and started")
+            # Try OpenAI Realtime first (preferred for low latency)
+            try:
+                asr_client = create_asr('openai_realtime', api_key=Config.OPENAI_API_KEY)
+                asr_client.set_callback(on_transcription_result)
+                asr_client.set_language(asr_config['source_language'])
+                asr_client.start()
+                logger.info("OpenAI Realtime ASR client initialized and started")
+                
+                # Start streaming with 16kHz mono audio
+                asr_client.start_stream(
+                    sample_rate=16000,
+                    channels=1,
+                    sample_width=2
+                )
+                logger.info("OpenAI Realtime ASR stream started")
+                
+                # No need for audio buffer with OpenAI Realtime - it handles streaming directly
+                audio_buffer = None
+                logger.info("Using direct streaming to OpenAI Realtime API")
+                
+            except Exception as realtime_error:
+                logger.warning(f"OpenAI Realtime API not available: {realtime_error}")
+                logger.info("Falling back to Whisper API")
+                
+                # Fallback to Whisper API
+                asr_client = create_asr('whisper', api_key=Config.OPENAI_API_KEY)
+                asr_client.set_callback(on_transcription_result)
+                asr_client.set_language(asr_config['source_language'])
+                asr_client.start()
+                logger.info("Whisper ASR client initialized and started")
+                
+                # Initialize audio buffer for Whisper (needs buffering)
+                from backend.asr.audio_buffer import SmartAudioBuffer
+                audio_buffer = SmartAudioBuffer(
+                    sample_rate=Config.AUDIO_SAMPLE_RATE,
+                    channels=Config.AUDIO_CHANNELS,
+                    chunk_duration=Config.AUDIO_CHUNK_DURATION,
+                    overlap_duration=0.5
+                )
+                def on_audio_chunk(audio_data, timestamp):
+                    if asr_client:
+                        asr_client.add_audio_data(audio_data)
+                audio_buffer.set_chunk_callback(on_audio_chunk)
+                audio_buffer.start()
+                logger.info("Audio buffer initialized for Whisper API")
             
             # Initialize translation service
             translation_service = TranslationService(api_key=Config.OPENAI_API_KEY)
@@ -357,9 +381,13 @@ def stream_audio_data():
     while audio_capture.is_recording:
         audio_data = audio_capture.get_audio_data(timeout=0.1)
         if audio_data:
-            # Send to audio buffer for ASR processing
+            # Send to appropriate processing method based on ASR type
             if audio_buffer:
+                # Use audio buffer for Whisper API (needs chunk processing)
                 audio_buffer.add_audio(audio_data)
+            elif asr_client:
+                # Send directly to ASR client for real-time processing (OpenAI Realtime)
+                asr_client.add_audio_data(audio_data)
             
             # Send audio data to client for visualization
             socketio.emit('audio_data', {
@@ -371,8 +399,9 @@ def stream_audio_data():
     # Stop services when recording stops
     if audio_buffer:
         audio_buffer.stop()
-    if whisper_client:
-        whisper_client.stop()
+    if asr_client:
+        asr_client.end_stream()
+        asr_client.stop()
     if translation_service:
         translation_service.stop()
 

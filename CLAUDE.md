@@ -33,12 +33,18 @@ The project consists of a single `main.py` file that contains:
 
 ## Key Technical Details
 
-- **Audio Processing**: The system captures audio in 32-bit float format which must be converted to 16-bit integer for WAV file output
+- **Audio Processing**: The system captures audio in various formats (typically 32-bit float or 16-bit int) and automatically resamples to the target format using PyAV for high-quality conversion
+- **Audio Resampling**: `backend/audio/capture.py` includes real-time resampling capability:
+  - Automatically detects input audio format (sample rate, channels, bit depth)
+  - Resamples to configured target format (default: 16kHz mono 16-bit for OpenAI Realtime API)
+  - Uses PyAV AudioResampler for high-quality sample rate and format conversion
+  - Handles both system audio and microphone audio streams separately
 - **Prevent Feedback**: Uses `excludesCurrentProcessAudio = True` to prevent recording the script's own audio output
 - **macOS Frameworks Used**:
   - ScreenCaptureKit: For screen and audio capture
   - AVFoundation: For audio format conversion
   - Foundation: For Objective-C runtime and threading
+  - PyAV: For high-quality audio resampling
 
 ## Dependencies
 
