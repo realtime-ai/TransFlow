@@ -7,24 +7,53 @@ logger = logging.getLogger(__name__)
 
 
 class TranslationClient:
-    """OpenAI GPT-4o-mini client for translation"""
+    """Translation client supporting both Alibaba Cloud qwen-mt-turbo and OpenAI GPT-4o-mini"""
     
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, provider: str = "auto"):
         """Initialize translation client with API key
         
         Args:
-            api_key: OpenAI API key, defaults to environment variable
+            api_key: API key (OpenAI or Dashscope), defaults to environment variable
+            provider: Translation provider ('qwen', 'openai', or 'auto')
         """
-        self.api_key = api_key or Config.OPENAI_API_KEY
-        if not self.api_key:
-            raise ValueError("OpenAI API key not provided. Set OPENAI_API_KEY in .env file.")
-        
-        self.client = OpenAI(api_key=self.api_key)
-        self.model = Config.OPENAI_MODEL_TRANSLATION
-        
-        # Context management
+        self.provider = provider
         self.context_window = []
         self.max_context_size = 10  # Keep last 10 translations for context
+        
+        # Auto-select provider based on available API keys
+        if provider == "auto":
+            if Config.DASHSCOPE_API_KEY:
+                self.provider = "qwen"
+                self.api_key = Config.DASHSCOPE_API_KEY
+                logger.info("Auto-selected Alibaba Cloud qwen-mt-turbo for translation")
+            elif Config.OPENAI_API_KEY:
+                self.provider = "openai"
+                self.api_key = api_key or Config.OPENAI_API_KEY
+                logger.info("Auto-selected OpenAI GPT-4o-mini for translation")
+            else:
+                raise ValueError("No translation API key available. Set either DASHSCOPE_API_KEY or OPENAI_API_KEY in .env file.")
+        else:
+            if provider == "qwen":
+                self.api_key = api_key or Config.DASHSCOPE_API_KEY
+                if not self.api_key:
+                    raise ValueError("Dashscope API key not provided. Set DASHSCOPE_API_KEY in .env file.")
+            elif provider == "openai":
+                self.api_key = api_key or Config.OPENAI_API_KEY
+                if not self.api_key:
+                    raise ValueError("OpenAI API key not provided. Set OPENAI_API_KEY in .env file.")
+            else:
+                raise ValueError("Provider must be 'qwen', 'openai', or 'auto'")
+        
+        # Initialize the appropriate client
+        if self.provider == "qwen":
+            self.client = OpenAI(
+                api_key=self.api_key,
+                base_url="https://dashscope.aliyuncs.com/compatible-mode/v1"
+            )
+            self.model = "qwen-mt-turbo"
+        else:  # OpenAI
+            self.client = OpenAI(api_key=self.api_key)
+            self.model = Config.OPENAI_MODEL_TRANSLATION
         
     def translate(
         self,
@@ -34,7 +63,7 @@ class TranslationClient:
         context: Optional[List[Dict[str, str]]] = None,
         use_context: bool = True
     ) -> Dict[str, Any]:
-        """Translate text using GPT-4o-mini
+        """Translate text using qwen-mt-turbo or GPT-4o-mini
         
         Args:
             text: Text to translate
@@ -47,71 +76,161 @@ class TranslationClient:
             Translation result dictionary
         """
         try:
-            # Get language names
-            source_lang_name = Config.SUPPORTED_LANGUAGES.get(source_language, source_language)
-            target_lang_name = Config.SUPPORTED_LANGUAGES.get(target_language, target_language)
-            
-            # Build system prompt
-            system_prompt = f"""You are a professional translator specializing in real-time speech translation.
-Translate the following {source_lang_name} text to {target_lang_name}.
-Maintain the natural flow and context of spoken language.
-Keep technical terms consistent throughout the translation.
-Only provide the translation, no explanations."""
-            
-            # Build messages
-            messages = [{"role": "system", "content": system_prompt}]
-            
-            # Add context if available and enabled
-            if use_context and (context or self.context_window):
-                context_items = context or self.context_window[-5:]  # Last 5 translations
-                if context_items:
-                    context_text = "\n".join([
-                        f"Previous: {item.get('source', '')}\nTranslation: {item.get('translation', '')}"
-                        for item in context_items
-                    ])
-                    messages.append({
-                        "role": "system",
-                        "content": f"Context from previous translations:\n{context_text}"
-                    })
-            
-            # Add the text to translate
-            messages.append({"role": "user", "content": text})
-            
-            # Call OpenAI API
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=messages,
-                temperature=0.3,  # Lower temperature for more consistent translations
-                max_tokens=1000
-            )
-            
-            # Extract translation
-            translation = response.choices[0].message.content.strip()
-            
-            # Update context window
-            context_entry = {
-                "source": text,
-                "translation": translation,
-                "source_language": source_language,
-                "target_language": target_language
-            }
-            self.context_window.append(context_entry)
-            
-            # Keep context window size manageable
-            if len(self.context_window) > self.max_context_size:
-                self.context_window.pop(0)
-            
-            return {
-                "translation": translation,
-                "source_text": text,
-                "source_language": source_language,
-                "target_language": target_language,
-                "model": self.model
-            }
+            if self.provider == "qwen":
+                return self._translate_with_qwen(text, source_language, target_language, context, use_context)
+            else:
+                return self._translate_with_openai(text, source_language, target_language, context, use_context)
             
         except Exception as e:
             logger.error(f"Translation error: {str(e)}")
             raise
+    
+    def _translate_with_qwen(
+        self,
+        text: str,
+        source_language: str,
+        target_language: str,
+        context: Optional[List[Dict[str, str]]] = None,
+        use_context: bool = True
+    ) -> Dict[str, Any]:
+        """Translate text using Alibaba Cloud qwen-mt-turbo"""
+        
+        # Map language codes to qwen-mt-turbo format
+        lang_mapping = {
+            'zh': 'Chinese',
+            'en': 'English', 
+            'ja': 'Japanese',
+            'ko': 'Korean',
+            'auto': 'auto'
+        }
+        
+        qwen_source_lang = lang_mapping.get(source_language, source_language)
+        qwen_target_lang = lang_mapping.get(target_language, target_language)
+        
+        # Build user content with context if enabled
+        user_content = text
+        if use_context and (context or self.context_window):
+            context_items = context or self.context_window[-3:]  # Last 3 translations for qwen
+            if context_items:
+                context_text = "\n".join([
+                    f"Previous: {item.get('source', '')}\nTranslation: {item.get('translation', '')}"
+                    for item in context_items
+                ])
+                user_content = f"Context from previous translations:\n{context_text}\n\nTranslate: {text}"
+        
+        # Build messages for qwen-mt-turbo (only user and assistant roles supported)
+        messages = [{"role": "user", "content": user_content}]
+        
+        # Translation options for qwen-mt-turbo
+        translation_options = {
+            "source_lang": qwen_source_lang,
+            "target_lang": qwen_target_lang
+        }
+        
+        # Call qwen-mt-turbo API
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            extra_body={"translation_options": translation_options}
+        )
+        
+        # Extract translation
+        translation = response.choices[0].message.content.strip()
+        
+        # Update context window
+        context_entry = {
+            "source": text,
+            "translation": translation,
+            "source_language": source_language,
+            "target_language": target_language
+        }
+        self.context_window.append(context_entry)
+        
+        # Keep context window size manageable
+        if len(self.context_window) > self.max_context_size:
+            self.context_window.pop(0)
+        
+        return {
+            "translation": translation,
+            "source_text": text,
+            "source_language": source_language,
+            "target_language": target_language,
+            "model": self.model,
+            "provider": "qwen"
+        }
+    
+    def _translate_with_openai(
+        self,
+        text: str,
+        source_language: str,
+        target_language: str,
+        context: Optional[List[Dict[str, str]]] = None,
+        use_context: bool = True
+    ) -> Dict[str, Any]:
+        """Translate text using OpenAI GPT-4o-mini"""
+        
+        # Get language names
+        source_lang_name = Config.SUPPORTED_LANGUAGES.get(source_language, source_language)
+        target_lang_name = Config.SUPPORTED_LANGUAGES.get(target_language, target_language)
+        
+        # Build system prompt
+        system_prompt = f"""You are a professional translator specializing in real-time speech translation.
+Translate the following {source_lang_name} text to {target_lang_name}.
+Maintain the natural flow and context of spoken language.
+Keep technical terms consistent throughout the translation.
+Only provide the translation, no explanations."""
+        
+        # Build messages
+        messages = [{"role": "system", "content": system_prompt}]
+        
+        # Add context if available and enabled
+        if use_context and (context or self.context_window):
+            context_items = context or self.context_window[-5:]  # Last 5 translations
+            if context_items:
+                context_text = "\n".join([
+                    f"Previous: {item.get('source', '')}\nTranslation: {item.get('translation', '')}"
+                    for item in context_items
+                ])
+                messages.append({
+                    "role": "system",
+                    "content": f"Context from previous translations:\n{context_text}"
+                })
+        
+        # Add the text to translate
+        messages.append({"role": "user", "content": text})
+        
+        # Call OpenAI API
+        response = self.client.chat.completions.create(
+            model=self.model,
+            messages=messages,
+            temperature=0.3,  # Lower temperature for more consistent translations
+            max_tokens=1000
+        )
+        
+        # Extract translation
+        translation = response.choices[0].message.content.strip()
+        
+        # Update context window
+        context_entry = {
+            "source": text,
+            "translation": translation,
+            "source_language": source_language,
+            "target_language": target_language
+        }
+        self.context_window.append(context_entry)
+        
+        # Keep context window size manageable
+        if len(self.context_window) > self.max_context_size:
+            self.context_window.pop(0)
+        
+        return {
+            "translation": translation,
+            "source_text": text,
+            "source_language": source_language,
+            "target_language": target_language,
+            "model": self.model,
+            "provider": "openai"
+        }
             
     def translate_batch(
         self,

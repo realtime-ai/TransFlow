@@ -124,7 +124,7 @@ class AudioCapture(NSObject):
         return microphones
     
     def start_recording(self, capture_system_audio=True, capture_microphone=True, 
-                       microphone_id=None, exclude_current_process=True):
+                       microphone_id=None, exclude_current_process=True, selected_apps=None):
         """Start audio recording with given configuration
         
         Args:
@@ -132,6 +132,7 @@ class AudioCapture(NSObject):
             capture_microphone: bool - Whether to capture microphone
             microphone_id: str (optional) - Specific microphone device ID
             exclude_current_process: bool - Whether to exclude current process audio
+            selected_apps: list (optional) - List of specific apps to capture (currently ignored)
         """
         if self.is_recording:
             raise RuntimeError("Already recording")
@@ -227,7 +228,7 @@ class AudioCapture(NSObject):
         self.delegate = None
         logger.info("Audio recording stopped")
     
-    def get_audio_data(self, timeout=0.1):
+    def get_system_audio_data(self, timeout=0.1):
         """Get resampled system audio data from queue
         
         Returns:
@@ -238,7 +239,7 @@ class AudioCapture(NSObject):
         except queue.Empty:
             return None
     
-    def get_mic_data(self, timeout=0.1):
+    def get_mic_audio_data(self, timeout=0.1):
         """Get resampled microphone audio data from separate queue
         
         Returns:

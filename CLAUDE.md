@@ -54,6 +54,14 @@ The project requires PyObjC but has no formal dependency management. Required im
 - `AVFoundation`
 - `ScreenCaptureKit`
 
+## ASR Configuration
+
+The project uses **OpenAI Realtime API** exclusively for transcription:
+- Audio format: 16kHz, mono, 16-bit PCM
+- Direct streaming without buffering for low latency
+- Automatic language detection supported
+- No fallback to Whisper API
+
 ## Notes
 
 - The project is macOS-specific and requires macOS 12.3+ for ScreenCaptureKit

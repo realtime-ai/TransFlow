@@ -39,6 +39,7 @@ def test_server_audio_capture_config():
         'capture_system_audio': True,
         'capture_microphone': True,
         'microphone_id': None,
+        'selected_apps': [],  # Include the parameter that was causing issues
         'exclude_current_process': True
     }
     

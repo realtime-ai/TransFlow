@@ -84,6 +84,7 @@ export function useSocketIO(
   const on = useCallback((event: string, handler: (data: any) => void) => {
     if (typeof window === 'undefined') return;
     if (socketRef.current) {
+      console.log(`🎧 Setting up listener for event: ${event}`);
       socketRef.current.on(event, handler);
     }
   }, []);

@@ -9,14 +9,16 @@ class Config:
     
     # OpenAI API Configuration
     OPENAI_API_KEY = os.environ.get('OPENAI_API_KEY', '')
-    OPENAI_MODEL_WHISPER = os.environ.get('OPENAI_MODEL_WHISPER', 'whisper-1')
     OPENAI_MODEL_TRANSLATION = os.environ.get('OPENAI_MODEL_TRANSLATION', 'gpt-4o-mini')
     
-    # Audio Configuration
-    AUDIO_SAMPLE_RATE = 48000
-    AUDIO_CHANNELS = 2
-    AUDIO_CHUNK_DURATION = 5  # seconds
-    AUDIO_FORMAT = 'wav'
+    # Dashscope API Configuration (for Paraformer)
+    DASHSCOPE_API_KEY = os.environ.get('DASHSCOPE_API_KEY', '')
+    
+    # Audio Configuration (optimized for OpenAI Realtime API)
+    AUDIO_SAMPLE_RATE = 16000  # OpenAI Realtime requires 16kHz
+    AUDIO_CHANNELS = 1  # OpenAI Realtime requires mono
+    AUDIO_BIT_DEPTH = 16  # OpenAI Realtime requires 16-bit
+    AUDIO_FORMAT = 'pcm16'  # Raw PCM 16-bit format
     
     # Translation Configuration
     DEFAULT_SOURCE_LANGUAGE = 'auto'  # auto-detect

@@ -51,7 +51,7 @@ def test_audio_capture_with_resampling():
         
         while time.time() - start_time < max_duration:
             # Get microphone data (should be resampled)
-            mic_data = audio_capture.get_mic_data(timeout=0.1)
+            mic_data = audio_capture.get_mic_audio_data(timeout=0.1)
             if mic_data:
                 samples_collected += len(mic_data) // 2  # 2 bytes per 16-bit sample
                 logger.info(f"Collected {len(mic_data)} bytes ({len(mic_data)//2} samples)")

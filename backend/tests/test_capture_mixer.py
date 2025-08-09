@@ -81,8 +81,8 @@ def test_dual_stream_recording(duration=5, output_file="mixed_recording.wav"):
         
         while time.time() - start_time < duration:
             # Get data from both sources
-            system_data = system_capture.get_audio_data(timeout=chunk_duration)
-            mic_data = mic_capture.get_audio_data(timeout=chunk_duration)
+            system_data = system_capture.get_system_audio_data(timeout=chunk_duration)
+            mic_data = mic_capture.get_mic_audio_data(timeout=chunk_duration)
             
             if system_data:
                 # Convert bytes to int16 array
@@ -105,7 +105,7 @@ def test_dual_stream_recording(duration=5, output_file="mixed_recording.wav"):
         
         # Get remaining data
         while True:
-            system_data = system_capture.get_audio_data(timeout=0.01)
+            system_data = system_capture.get_system_audio_data(timeout=0.01)
             if system_data:
                 system_array = np.frombuffer(system_data, dtype=np.int16)
                 system_chunks.append(system_array)
@@ -113,7 +113,7 @@ def test_dual_stream_recording(duration=5, output_file="mixed_recording.wav"):
                 break
         
         while True:
-            mic_data = mic_capture.get_audio_data(timeout=0.01)
+            mic_data = mic_capture.get_mic_audio_data(timeout=0.01)
             if mic_data:
                 mic_array = np.frombuffer(mic_data, dtype=np.int16)
                 mic_chunks.append(mic_array)
@@ -195,7 +195,7 @@ def test_system_audio_only(duration=3, output_file="system_only.wav"):
         # Get all data
         chunks = []
         while True:
-            data = capture.get_audio_data(timeout=0.01)
+            data = capture.get_system_audio_data(timeout=0.01)
             if data:
                 array = np.frombuffer(data, dtype=np.int16)
                 chunks.append(array)
@@ -255,7 +255,7 @@ def test_volume_adjustment_recording(duration=3):
             mixer.set_input_volume(2, 0.0)  # Mute input 2
             
             # Get audio data
-            data = capture.get_audio_data(timeout=0.1)
+            data = capture.get_system_audio_data(timeout=0.1)
             if data:
                 array = np.frombuffer(data, dtype=np.int16)
                 

@@ -12,13 +12,14 @@ logger = logging.getLogger(__name__)
 class TranslationService:
     """Service to manage real-time translation of ASR output"""
     
-    def __init__(self, api_key: Optional[str] = None):
+    def __init__(self, api_key: Optional[str] = None, provider: str = "auto"):
         """Initialize translation service
         
         Args:
-            api_key: OpenAI API key, defaults to environment variable
+            api_key: API key (OpenAI or Dashscope), defaults to environment variable
+            provider: Translation provider ('qwen', 'openai', or 'auto')
         """
-        self.translation_client = TranslationClient(api_key=api_key)
+        self.translation_client = TranslationClient(api_key=api_key, provider=provider)
         self.is_running = False
         self.processing_thread = None
         
@@ -202,12 +203,12 @@ class TranslationService:
             return
         
         try:
-            # Translate
+            # Translate without context
             result = self.translation_client.translate(
                 text=text,
                 source_language=self.source_language,
                 target_language=self.target_language,
-                use_context=True
+                use_context=False
             )
             
             # Add timestamp
@@ -248,12 +249,11 @@ class TranslationService:
             except Exception as e:
                 logger.error(f"Error in translation callback: {e}")
     
-    def clear_context(self):
-        """Clear translation context and cache"""
-        self.translation_client.clear_context()
+    def clear_cache(self):
+        """Clear translation cache"""
         self.translation_cache.clear()
         self.sentence_buffer = ""
-        logger.info("Translation context and cache cleared")
+        logger.info("Translation cache cleared")
     
     def get_stats(self) -> Dict[str, Any]:
         """Get service statistics
@@ -266,7 +266,6 @@ class TranslationService:
             'queue_size': self.input_queue.qsize(),
             'buffer_length': len(self.sentence_buffer),
             'cache_size': len(self.translation_cache),
-            'context_size': len(self.translation_client.get_context()),
             'languages': {
                 'source': self.source_language,
                 'target': self.target_language

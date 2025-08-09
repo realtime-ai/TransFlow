@@ -36,24 +36,72 @@ export default function RecordPage() {
   }, [isRecording])
 
   useEffect(() => {
+    // Handle separate transcription events
+
+    console.log('Setting up transcription listener')
+
     const handleTranscription = (data: any) => {
-      const { text, translation, timestamp } = data
+      console.log('📝 Transcription received:', data)
+      const { text, language, timestamp } = data
+      if (text) {
+        console.log('📝 Setting current transcription:', text)
+        setCurrentTranscription(text)
+      }
+    }
+
+    // Handle separate translation events
+    const handleTranslation = (data: any) => {
+      console.log('🌍 Translation received:', data)
+      const { source_text, translation, timestamp, error } = data
       
-      if (text && translation) {
+      if (error) {
+        console.error('Translation error:', error)
+        return
+      }
+      
+      if (source_text && translation) {
+        console.log('🌍 Creating complete transcription entry:', { source_text, translation })
+        
+        // Create a complete transcription entry when we have both source and translation
+        let processedTimestamp;
+        try {
+          if (timestamp) {
+            // Handle both Unix timestamp (seconds) and milliseconds
+            const ts = typeof timestamp === 'number' ? timestamp : parseFloat(timestamp);
+            // If timestamp is less than a recent date in milliseconds, it's likely in seconds
+            processedTimestamp = ts < 1000000000000 ? new Date(ts * 1000).toISOString() : new Date(ts).toISOString();
+          } else {
+            processedTimestamp = new Date().toISOString();
+          }
+        } catch (e) {
+          console.warn('⚠️ Timestamp processing error:', e);
+          processedTimestamp = new Date().toISOString();
+        }
+        
         const newTranscription: TranscriptionData = {
-          id: Date.now().toString(),
-          sourceText: text,
+          id: `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`,
+          sourceText: source_text,
           translatedText: translation,
-          timestamp: timestamp || new Date().toISOString(),
+          timestamp: processedTimestamp,
           confidence: 1.0
         }
-        setTranscriptions(prev => [...prev, newTranscription])
+        
+        console.log('📝 About to add transcription:', newTranscription);
+        
+        setTranscriptions(prev => {
+          const newList = [...prev, newTranscription];
+          console.log('📝 Added transcription to list. New count:', newList.length);
+          console.log('📝 Full transcriptions list:', newList);
+          return newList;
+        })
         setCurrentTranscription('')
         setCurrentTranslation('')
+      } else if (translation) {
+        console.log('🌍 Setting current translation:', translation)
+        // Update current translation
+        setCurrentTranslation(translation)
       } else {
-        // Partial transcription
-        if (text) setCurrentTranscription(text)
-        if (translation) setCurrentTranslation(translation)
+        console.log('🌍 Translation event missing required fields:', { source_text, translation });
       }
     }
 
@@ -74,31 +122,56 @@ export default function RecordPage() {
     }
 
     const handleError = (error: any) => {
-      console.error('Socket.IO error:', error)
+      console.error('❌ Socket.IO error:', error)
     }
 
+    console.log('🔧 Setting up event listeners...')
+    
+    // Debug: Listen to all events
+    const handleAllEvents = (eventName: string) => (data: any) => {
+      console.log(`🔍 Event received: ${eventName}`, data)
+    }
+    
     on('transcription', handleTranscription)
+    on('translation', handleTranslation)
     on('recording_started', handleRecordingStarted)
     on('recording_stopped', handleRecordingStopped)
     on('error', handleError)
-
-    // Load settings from localStorage
-    const savedSettings = localStorage.getItem('transflow-settings')
-    if (savedSettings) {
-      const settings = JSON.parse(savedSettings)
-      emit('set_languages', {
-        sourceLanguage: settings.sourceLanguage,
-        targetLanguage: settings.targetLanguage
-      })
-    }
+    
+    // Add debug listeners
+    on('connect', handleAllEvents('connect'))
+    on('disconnect', handleAllEvents('disconnect'))
+    on('connection_status', handleAllEvents('connection_status'))
+    
+    console.log('✅ Event listeners configured')
 
     return () => {
-      off('transcription', handleTranscription)
-      off('recording_started', handleRecordingStarted)
-      off('recording_stopped', handleRecordingStopped)
-      off('error', handleError)
+      // off('transcription', handleTranscription)
+      // off('translation', handleTranslation)
+      // off('recording_started', handleRecordingStarted)
+      // off('recording_stopped', handleRecordingStopped)
+      // off('error', handleError)
+      // off('connect', handleAllEvents('connect'))
+      // off('disconnect', handleAllEvents('disconnect'))
+      // off('connection_status', handleAllEvents('connection_status'))
     }
-  }, [emit, on, off])
+  }, [on, off])
+
+  // 单独的useEffect来处理设置加载
+  useEffect(() => {
+    if (isConnected) {
+      console.log('🔧 Loading settings and configuring languages...')
+      const savedSettings = localStorage.getItem('transflow-settings')
+      if (savedSettings) {
+        const settings = JSON.parse(savedSettings)
+        console.log('📋 Loaded settings:', settings)
+        emit('set_languages', {
+          sourceLanguage: settings.sourceLanguage,
+          targetLanguage: settings.targetLanguage
+        })
+      }
+    }
+  }, [isConnected, emit])
 
   const formatTime = (seconds: number) => {
     const hours = Math.floor(seconds / 3600)
@@ -138,6 +211,21 @@ export default function RecordPage() {
       case 'target': return 'English'
       default: return '双语'
     }
+  }
+
+  const addTestTranscription = () => {
+    console.log('🧪 Adding test transcription...')
+    const testTranscription: TranscriptionData = {
+      id: `test-${Date.now()}`,
+      sourceText: '你好，世界！这是一个测试。',
+      translatedText: 'Hello, world! This is a test.',
+      timestamp: new Date().toISOString(),
+      confidence: 1.0
+    }
+    setTranscriptions(prev => {
+      console.log('🧪 Adding test transcription, previous count:', prev.length)
+      return [...prev, testTranscription]
+    })
   }
 
   const exportTranscription = () => {
@@ -214,6 +302,13 @@ export default function RecordPage() {
                 停止录制
               </button>
             )}
+            
+            <button
+              onClick={addTestTranscription}
+              className="btn-primary text-white px-6 py-4 rounded-xl font-semibold flex items-center gap-2"
+            >
+              🧪 测试
+            </button>
             
             <button
               onClick={exportTranscription}
@@ -360,6 +455,17 @@ export default function RecordPage() {
           )}
         </div>
         
+        {/* Debug Info */}
+        <div className="mt-6 pt-6 border-t border-gray-200">
+          <div className="bg-gray-100 p-4 rounded-xl mb-4 text-sm">
+            <h4 className="font-bold mb-2">🔧 调试信息</h4>
+            <div>连接状态: {isConnected ? '已连接 ✅' : '未连接 ❌'}</div>
+            <div>当前转写: {currentTranscription || '无'}</div>
+            <div>当前翻译: {currentTranslation || '无'}</div>
+            <div>总转写数量: {transcriptions.length}</div>
+          </div>
+        </div>
+
         {/* Statistics */}
         <div className="mt-6 pt-6 border-t border-gray-200 grid grid-cols-3 gap-4">
           <div className="glass p-4 rounded-xl text-center">

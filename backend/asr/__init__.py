@@ -7,6 +7,7 @@ several concrete implementations for different ASR services.
 Available implementations:
 - WhisperClient: OpenAI Whisper API for high-quality transcription
 - OpenAIRealtimeASR: OpenAI Realtime API for low-latency streaming transcription
+- ParaformerRealtimeASR: Alibaba Cloud Paraformer for Chinese real-time recognition
 
 Usage:
     # Using Whisper API for file transcription
@@ -35,6 +36,17 @@ Usage:
         # Add audio data...
         realtime.add_audio_data(audio_bytes)
         realtime.end_stream()
+    
+    # Using Paraformer for Chinese real-time streaming
+    from backend.asr import ParaformerRealtimeASR
+    
+    paraformer = ParaformerRealtimeASR(api_key="your-dashscope-key")
+    paraformer.set_callback(on_result)
+    with paraformer:
+        paraformer.start_stream(sample_rate=16000, channels=1)
+        # Add audio data...
+        paraformer.add_audio_data(audio_bytes)
+        paraformer.end_stream()
 """
 
 from .base import ASRBase, StreamingASRBase, ASRResult, ASRError
@@ -52,6 +64,18 @@ except ImportError as e:
         "Install websockets package to enable: pip install websockets"
     )
 
+# Optional import for Paraformer Realtime (requires dashscope)
+try:
+    from .paraformer_realtime import ParaformerRealtimeASR
+    _PARAFORMER_AVAILABLE = True
+except ImportError as e:
+    _PARAFORMER_AVAILABLE = False
+    import logging
+    logging.getLogger(__name__).info(
+        f"Paraformer Realtime ASR not available: {e}. "
+        "Install dashscope package to enable: pip install dashscope"
+    )
+
 __all__ = [
     # Base classes
     'ASRBase', 
@@ -66,6 +90,10 @@ __all__ = [
 # Add OpenAI Realtime if available
 if _REALTIME_AVAILABLE:
     __all__.append('OpenAIRealtimeASR')
+
+# Add Paraformer if available
+if _PARAFORMER_AVAILABLE:
+    __all__.append('ParaformerRealtimeASR')
 
 
 def get_available_asrs():
@@ -82,6 +110,9 @@ def get_available_asrs():
     if _REALTIME_AVAILABLE:
         asrs['openai_realtime'] = OpenAIRealtimeASR
     
+    if _PARAFORMER_AVAILABLE:
+        asrs['paraformer_realtime'] = ParaformerRealtimeASR
+    
     return asrs
 
 
@@ -90,7 +121,7 @@ def create_asr(asr_type: str, **kwargs):
     Factory function to create ASR instances
     
     Args:
-        asr_type: Type of ASR ('whisper', 'openai_realtime')
+        asr_type: Type of ASR ('whisper', 'openai_realtime', 'paraformer_realtime')
         **kwargs: Arguments to pass to the ASR constructor
         
     Returns:

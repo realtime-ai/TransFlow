@@ -3,6 +3,7 @@ import os
 import time
 import logging
 import json
+import threading
 from functools import wraps
 from flask import Flask, render_template, send_from_directory, request
 from flask_socketio import SocketIO, emit
@@ -10,8 +11,7 @@ from flask_cors import CORS
 
 from config import Config
 from backend.audio.capture import AudioCapture
-from backend.asr import create_asr, OpenAIRealtimeASR
-# from backend.asr.audio_buffer import SmartAudioBuffer  # Not needed for OpenAI Realtime
+from backend.asr import create_asr
 from backend.models.translation_service import TranslationService
 
 logging.basicConfig(level=logging.INFO)
@@ -28,6 +28,7 @@ CORS(app)
 socketio = SocketIO(app, 
                     cors_allowed_origins="*",
                     logger=True,
+                    async_mode="threading",
                     engineio_logger=True,
                     ping_timeout=Config.SOCKETIO_PING_TIMEOUT,
                     ping_interval=Config.SOCKETIO_PING_INTERVAL)
@@ -38,7 +39,6 @@ audio_capture.init(sample_rate=16000, channels=1, bit_depth=16)
 
 # Initialize ASR components
 asr_client = None
-audio_buffer = None
 translation_service = None
 
 # ASR configuration
@@ -49,6 +49,32 @@ asr_config = {
 
 # Connected clients tracking
 connected_clients = set()
+
+# Using Flask-SocketIO's start_background_task for thread-safe events
+# No longer need manual queue management
+
+def safe_emit(event_name, data, client_sid=None, namespace='/'):
+    """Thread-safe emit function using start_background_task"""
+    def emit_task():
+        try:
+            if client_sid and client_sid in connected_clients:
+                # Emit to specific client
+                socketio.emit(event_name, data, room=client_sid, namespace=namespace)
+                logger.debug(f"✅ Event {event_name} sent to client {client_sid}")
+            elif not client_sid:
+                # Broadcast to all clients
+                socketio.emit(event_name, data, namespace=namespace)
+                logger.debug(f"✅ Event {event_name} broadcasted to all clients")
+            else:
+                logger.warning(f"⚠️ Client {client_sid} not connected, dropping event {event_name}")
+        except Exception as e:
+            logger.error(f"❌ Error emitting event {event_name}: {e}")
+    
+    # Use Flask-SocketIO's background task for thread-safe emission
+    socketio.start_background_task(emit_task)
+    logger.debug(f"🔄 Started background task for event {event_name}")
+
+# Queue system removed - using socketio.start_background_task instead
 
 def handle_socketio_error(f):
     """Decorator for handling SocketIO errors"""
@@ -92,6 +118,8 @@ def handle_connect():
     try:
         logger.info(f"Client connected: {request.sid}")
         connected_clients.add(request.sid)
+    
+        
         emit('connection_status', {
             'status': 'connected',
             'client_id': request.sid,
@@ -104,6 +132,12 @@ def handle_connect():
 def handle_disconnect():
     logger.info(f"Client disconnected: {request.sid}")
     connected_clients.discard(request.sid)
+    
+    # If no clients connected, stop event worker
+    if not connected_clients:
+        logger.info("No connected clients, stopping event worker")
+        ## stop_event_worker()
+    
     # Clean up any client-specific resources if needed
 
 @socketio.on('ping')
@@ -215,8 +249,8 @@ def handle_start_recording(data):
         audio_capture.start_recording(**config)
         emit('recording_started', {'status': 'success'})
         
-        # 启动音频流处理任务
-        socketio.start_background_task(stream_audio_data)
+        # 启动音频流处理任务，传递客户端 sid
+        socketio.start_background_task(stream_audio_data, request.sid)
         
     except Exception as e:
         logger.error(f"Error starting recording: {e}")
@@ -233,10 +267,6 @@ def handle_stop_recording(data=None):
         logger.error(f"Error stopping recording: {e}")
         emit('error', {'message': str(e)})
 
-@socketio.on('audio_data')
-def handle_audio_data(data):
-    # TODO: Process audio data
-    pass
 
 @socketio.on('error')
 def handle_error(error):
@@ -255,6 +285,26 @@ def handle_heartbeat(data):
         'server_timestamp': server_timestamp,
         'latency': latency
     })
+
+@socketio.on('test_rapid_event')
+@handle_socketio_error
+def handle_test_rapid_event(data):
+    """Test handler for rapid events to test thread safety"""
+    count = data.get('count', 0)
+    timestamp = data.get('timestamp', time.time())
+    
+    # Simulate background thread emission
+    def emit_response():
+        time.sleep(0.05)  # Small delay to simulate processing
+        safe_emit('test_event', {
+            'original_count': count,
+            'processed_timestamp': time.time(),
+            'original_timestamp': timestamp
+        }, request.sid)
+    
+    # Start background thread
+    threading.Thread(target=emit_response, daemon=True).start()
+    logger.info(f"🧪 Processed test event {count} for client {request.sid}")
 
 @socketio.on('set_languages')
 @handle_socketio_error
@@ -285,47 +335,104 @@ def handle_set_languages(data):
         logger.error(f"Error setting languages: {e}")
         emit('error', {'message': str(e)})
 
-def on_transcription_result(result):
-    """Callback for ASR transcription results"""
-    logger.info(f"Transcription: {result.text}")
-    socketio.emit('transcription', {
-        'text': result.text,
-        'language': result.language,
-        'timestamp': result.timestamp
-    })
+def create_transcription_callback(client_sid):
+    """Create a transcription callback with client sid"""
+    def on_transcription_result(result):
+        """Callback for ASR transcription results"""
+        logger.error(f"📝 Transcription callback for client {client_sid}: {result.text}")
+        
+        try:
+            transcription_data = {
+                'text': result.text,
+                'language': result.language,
+                'timestamp': result.timestamp
+            }
+            logger.error(f"📝 Emitting transcription event to {client_sid}: {transcription_data}")
+            
+            # Use thread-safe emit with client sid
+            safe_emit('transcription', transcription_data, client_sid)
+            logger.info(f"📝 Transcription event emitted successfully to {client_sid}")
+        except Exception as e:
+            logger.error(f"❌ Error emitting transcription to {client_sid}: {e}")
+            import traceback
+            traceback.print_exc()
+        
+        # Feed transcription to translation service
+        if translation_service and translation_service.is_running:
+            try:
+                # Convert ASRResult to dictionary format for translation service
+                transcription_dict = {
+                    'text': result.text,
+                    'language': result.language,
+                    'timestamp': result.timestamp,
+                    'is_final': getattr(result, 'is_final', True),
+                    'metadata': getattr(result, 'metadata', {})
+                }
+                translation_service.add_transcription(transcription_dict)
+                logger.info("📝 Fed transcription to translation service")
+            except Exception as e:
+                logger.error(f"❌ Error feeding transcription to translation service: {e}")
     
-    # Feed transcription to translation service
-    if translation_service and translation_service.is_running:
-        translation_service.add_transcription(result)
+    return on_transcription_result
 
-def on_translation_result(result):
-    """Callback for translation results"""
-    logger.info(f"Translation: {result.get('translation', '')[:50]}...")
-    socketio.emit('translation', {
-        'source_text': result.get('source_text', ''),
-        'translation': result.get('translation', ''),
-        'source_language': result.get('source_language', ''),
-        'target_language': result.get('target_language', ''),
-        'timestamp': result.get('timestamp', time.time()),
-        'error': result.get('error')
-    })
+def create_translation_callback(client_sid):
+    """Create a translation callback with client sid"""
+    def on_translation_result(result):
+        """Callback for translation results"""
+        logger.info(f"🌍 Translation callback for client {client_sid}: {result.get('translation', '')[:50]}...")
+        
+        try:
+            translation_data = {
+                'source_text': result.get('source_text', ''),
+                'translation': result.get('translation', ''),
+                'source_language': result.get('source_language', ''),
+                'target_language': result.get('target_language', ''),
+                'timestamp': result.get('timestamp', time.time()),
+                'error': result.get('error')
+            }
+            logger.info(f"🌍 Emitting translation event to {client_sid}: {translation_data}")
+            
+            # Use thread-safe emit with client sid
+            safe_emit('translation', translation_data, client_sid)
+            logger.info(f"🌍 Translation event emitted successfully to {client_sid}")
+            
+        except Exception as e:
+            logger.error(f"❌ Error emitting translation to {client_sid}: {e}")
+            import traceback
+            traceback.print_exc()
+    
+    return on_translation_result
 
 # on_audio_chunk function not needed with direct streaming
 
-def stream_audio_data():
+def stream_audio_data(client_sid):
     """Stream audio data to client and ASR"""
-    global asr_client, audio_buffer, translation_service
+    global asr_client, translation_service
     
-    # Initialize OpenAI ASR client if API key is available
-    if Config.OPENAI_API_KEY and not asr_client:
-        try:
-            # Try OpenAI Realtime first (preferred for low latency)
+    logger.info(f"🎙️ Starting audio stream for client {client_sid}")
+    
+    # Priority 1: Use Paraformer for Chinese if available
+    if Config.DASHSCOPE_API_KEY and not asr_client:
+        # Check if source language is Chinese or auto
+        source_lang = asr_config.get('source_language', 'zh')
+        if source_lang in ['zh', 'auto', None]:
             try:
-                asr_client = create_asr('openai_realtime', api_key=Config.OPENAI_API_KEY)
-                asr_client.set_callback(on_transcription_result)
-                asr_client.set_language(asr_config['source_language'])
+                # Use Paraformer for Chinese real-time transcription
+                asr_client = create_asr(
+                    'paraformer_realtime', 
+                    api_key=Config.DASHSCOPE_API_KEY,
+                    model='paraformer-realtime-v2',
+                    debug_dump_audio=True,
+                    enable_punctuation=True,
+                    enable_itn=True,
+                    language='zh'
+                )
+                # Set callback with client sid
+                transcription_callback = create_transcription_callback(client_sid)
+                asr_client.set_callback(transcription_callback)
+                asr_client.set_language(source_lang)
                 asr_client.start()
-                logger.info("OpenAI Realtime ASR client initialized and started")
+                logger.info("Paraformer Realtime ASR client initialized and started")
                 
                 # Start streaming with 16kHz mono audio
                 asr_client.start_stream(
@@ -333,72 +440,88 @@ def stream_audio_data():
                     channels=1,
                     sample_width=2
                 )
-                logger.info("OpenAI Realtime ASR stream started")
+                logger.info("Paraformer Realtime ASR stream started")
+                logger.info("Using Paraformer for Chinese real-time transcription")
                 
-                # No need for audio buffer with OpenAI Realtime - it handles streaming directly
-                audio_buffer = None
-                logger.info("Using direct streaming to OpenAI Realtime API")
-                
-            except Exception as realtime_error:
-                logger.warning(f"OpenAI Realtime API not available: {realtime_error}")
-                logger.info("Falling back to Whisper API")
-                
-                # Fallback to Whisper API
-                asr_client = create_asr('whisper', api_key=Config.OPENAI_API_KEY)
-                asr_client.set_callback(on_transcription_result)
-                asr_client.set_language(asr_config['source_language'])
-                asr_client.start()
-                logger.info("Whisper ASR client initialized and started")
-                
-                # Initialize audio buffer for Whisper (needs buffering)
-                from backend.asr.audio_buffer import SmartAudioBuffer
-                audio_buffer = SmartAudioBuffer(
-                    sample_rate=Config.AUDIO_SAMPLE_RATE,
-                    channels=Config.AUDIO_CHANNELS,
-                    chunk_duration=Config.AUDIO_CHUNK_DURATION,
-                    overlap_duration=0.5
+                # Initialize translation service (auto-select provider)
+                translation_service = TranslationService(provider="auto")
+                translation_service.set_languages(
+                    asr_config.get('source_language', 'zh'),
+                    asr_config.get('target_language', 'en')
                 )
-                def on_audio_chunk(audio_data, timestamp):
-                    if asr_client:
-                        asr_client.add_audio_data(audio_data)
-                audio_buffer.set_chunk_callback(on_audio_chunk)
-                audio_buffer.start()
-                logger.info("Audio buffer initialized for Whisper API")
+                # Set callback with client sid
+                translation_callback = create_translation_callback(client_sid)
+                translation_service.set_callback(translation_callback)
+                translation_service.start()
+                logger.info("Translation service initialized and started")
+                    
+            except Exception as e:
+                logger.error(f"Failed to initialize Paraformer ASR: {e}")
+                # Don't exit, fall back to OpenAI Realtime
+                asr_client = None
+    
+    # Priority 2: Fallback to OpenAI Realtime if Paraformer not available or failed
+    if Config.OPENAI_API_KEY and not asr_client:
+        try:
+            # Use OpenAI Realtime for multilingual transcription
+            asr_client = create_asr('openai_realtime', api_key=Config.OPENAI_API_KEY, debug_dump_audio=True)
+            # Set callback with client sid
+            transcription_callback = create_transcription_callback(client_sid)
+            asr_client.set_callback(transcription_callback)
+            asr_client.set_language(asr_config['source_language'])
+            asr_client.start()
+            logger.info("OpenAI Realtime ASR client initialized and started (fallback)")
             
-            # Initialize translation service
-            translation_service = TranslationService(api_key=Config.OPENAI_API_KEY)
+            # Start streaming with 16kHz mono audio
+            asr_client.start_stream(
+                sample_rate=16000,
+                channels=1,
+                sample_width=2
+            )
+            logger.info("OpenAI Realtime ASR stream started")
+            logger.info("Using OpenAI Realtime API for transcription")
+            
+            # Initialize translation service (auto-select provider)
+            translation_service = TranslationService(provider="auto")
             translation_service.set_languages(
                 asr_config.get('source_language', 'auto'),
                 asr_config.get('target_language', 'en')
             )
-            translation_service.set_callback(on_translation_result)
+            # Set callback with client sid
+            translation_callback = create_translation_callback(client_sid)
+            translation_service.set_callback(translation_callback)
             translation_service.start()
             logger.info("Translation service initialized and started")
         except Exception as e:
-            logger.error(f"Failed to initialize services: {e}")
-            socketio.emit('error', {'message': f'Service initialization failed: {str(e)}'})
+            logger.error(f"Failed to initialize OpenAI Realtime ASR: {e}")
+            # Use thread-safe emit for error
+            safe_emit('error', {'message': f'ASR initialization failed: {str(e)}'}, client_sid)
+            # Exit early if both ASR services fail
+            return
     
+    # If no ASR service available, exit
+    if not asr_client:
+        error_msg = "No ASR service available. Please configure DASHSCOPE_API_KEY or OPENAI_API_KEY."
+        logger.error(error_msg)
+        # Use thread-safe emit for error
+        safe_emit('error', {'message': error_msg}, client_sid)
+        return
+    
+    # Stream audio data
     while audio_capture.is_recording:
-        audio_data = audio_capture.get_audio_data(timeout=0.1)
-        if audio_data:
-            # Send to appropriate processing method based on ASR type
-            if audio_buffer:
-                # Use audio buffer for Whisper API (needs chunk processing)
-                audio_buffer.add_audio(audio_data)
-            elif asr_client:
-                # Send directly to ASR client for real-time processing (OpenAI Realtime)
-                asr_client.add_audio_data(audio_data)
-            
+        audio_data = audio_capture.get_mic_audio_data(timeout=0.1)
+        if audio_data and asr_client:
+            # Send directly to OpenAI Realtime ASR
+            asr_client.add_audio_data(audio_data)
+
             # Send audio data to client for visualization
-            socketio.emit('audio_data', {
-                'data': audio_data.hex(),  # Convert bytes to hex for transmission
-                'timestamp': time.time()
-            })
+            # socketio.emit('audio_data', {
+            #     'data': audio_data.hex(),  # Convert bytes to hex for transmission
+            #     'timestamp': time.time()
+            # })
         socketio.sleep(0.01)  # Small delay to prevent overwhelming
     
     # Stop services when recording stops
-    if audio_buffer:
-        audio_buffer.stop()
     if asr_client:
         asr_client.end_stream()
         asr_client.stop()
